@@ -40,7 +40,7 @@ def speak(request: SpeakRequest) -> SpeechResult:
     output = request.output or _default_output_path()
     write_generated_audio(output, audio, sample_rate)
     if request.play:
-        play_wav(output)
+        play_wav(output, volume=request.volume)
     return SpeechResult(backend="chatterbox", sample_rate=sample_rate, output_path=output)
 
 

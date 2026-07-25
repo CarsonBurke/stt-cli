@@ -40,7 +40,7 @@ def speak(request: SpeakRequest, config: dict[str, ConfigValue]) -> SpeechResult
     output.parent.mkdir(parents=True, exist_ok=True)
     sf.write(str(output), audio.samples, samplerate=audio.sample_rate, subtype="PCM_16")
     if request.play:
-        play_wav(output)
+        play_wav(output, volume=request.volume)
     return SpeechResult(backend="onnx", sample_rate=int(audio.sample_rate), output_path=output)
 
 

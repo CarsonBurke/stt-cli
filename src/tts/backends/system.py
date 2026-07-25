@@ -14,7 +14,7 @@ def speak(request: SpeakRequest) -> SpeechResult:
     if request.output is not None:
         result = _write_to_file(request)
         if request.play:
-            play_wav(request.output)
+            play_wav(request.output, volume=request.volume)
         return result
     if not request.play:
         raise SpeechError("System backend needs --output when --no-play is set.")

@@ -49,7 +49,7 @@ def speak(request: SpeakRequest) -> SpeechResult:
     output = request.output or _default_output_path()
     write_generated_audio(output, audio, int(sample_rate))
     if request.play:
-        play_wav(output)
+        play_wav(output, volume=request.volume)
     return SpeechResult(backend="qwen3", sample_rate=int(sample_rate), output_path=output)
 
 

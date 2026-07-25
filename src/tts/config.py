@@ -15,6 +15,7 @@ CONFIGURABLE_NAMES = (
     "voice",
     "speaker",
     "speed",
+    "volume",
     "model_size",
     "model",
     "device",
@@ -57,6 +58,7 @@ BUILTIN_DEFAULTS = {
     "backend": "kokoro",
     "speaker": "af_sarah",
     "speed": 1.25,
+    "volume": 0.7,
     "device": "auto",
     "model_size": "0.5",
     "provider": "auto",
@@ -84,6 +86,7 @@ CHOICES = {
 
 TYPES: dict[str, Callable[[str], object]] = {
     "speed": float,
+    "volume": float,
     "exaggeration": float,
     "cfg_weight": float,
     "num_threads": int,

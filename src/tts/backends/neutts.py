@@ -37,7 +37,7 @@ def speak(request: SpeakRequest) -> SpeechResult:
     output = request.output or _default_output_path()
     write_generated_audio(output, audio, DEFAULT_SAMPLE_RATE)
     if request.play:
-        play_wav(output)
+        play_wav(output, volume=request.volume)
     return SpeechResult(backend="neutts", sample_rate=DEFAULT_SAMPLE_RATE, output_path=output)
 
 

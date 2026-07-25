@@ -270,6 +270,7 @@ def _request_from_args(args: argparse.Namespace, text: str, output: Optional[Pat
         play=play,
         voice=args.voice,
         speed=args.speed,
+        volume=args.volume,
         device=args.device,
         model=args.model,
         model_size=args.model_size,
@@ -452,6 +453,12 @@ def _add_speak_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--voice", help="Voice name for system backend.")
     parser.add_argument("--speaker", help="Speaker id/name for model backends.")
     parser.add_argument("--speed", type=float, help="Speech speed for supported backends.")
+    parser.add_argument(
+        "--volume",
+        type=float,
+        default=None,
+        help="Playback volume as linear gain 0.0–1.0 (default: 0.7). Applied at play time only.",
+    )
     parser.add_argument("--language", help="Language or language code for model backends.")
     parser.add_argument("--instruct", help="Instruction prompt for supported model backends.")
     parser.add_argument("--reference-audio", help="Reference audio path for cloning/prompted model backends.")

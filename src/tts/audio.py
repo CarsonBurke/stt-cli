@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import shutil
 import signal
 import struct
@@ -18,6 +19,25 @@ class SpeechError(RuntimeError):
 
 Sample = Union[float, int]
 
+# Linear playback gain in [0, 1]. Applied by the player when possible so
+# --no-play WAV output stays full-scale.
+DEFAULT_VOLUME = 0.7
+# paplay --volume uses a linear scale from 0 to 65536 (100%).
+PAPLAY_VOLUME_MAX = 65536
+# Request a short client buffer so SIGSTOP pause goes quiet quickly without
+# discarding stream position (resume continues mid-utterance, no skipped words).
+PAPLAY_LATENCY_MSEC = 40
+PAPLAY_PROCESS_TIME_MSEC = 10
+
+
+def clamp_volume(volume: float) -> float:
+    return max(0.0, min(1.0, float(volume)))
+
+
+def paplay_volume_value(volume: float) -> int:
+    """Map linear 0.0–1.0 gain to paplay's 0…65536 volume scale."""
+    return int(round(clamp_volume(volume) * PAPLAY_VOLUME_MAX))
+
 
 def write_wav(path: Path, samples: Sequence[Sample], sample_rate: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -28,8 +48,9 @@ def write_wav(path: Path, samples: Sequence[Sample], sample_rate: int) -> None:
         wav.writeframes(_pcm16_bytes(samples))
 
 
-def play_wav(path: Path) -> None:
-    command = playback_command(path)
+def play_wav(path: Path, volume: float = DEFAULT_VOLUME) -> None:
+    volume = clamp_volume(volume)
+    command = playback_command(path, volume=volume)
     if command is None:
         raise SpeechError("No WAV playback command found for this platform.")
     # Windows SoundPlayer path has no portable pause hooks; keep it simple.
@@ -47,7 +68,7 @@ def play_wav(path: Path) -> None:
         playback_ctl = None  # type: ignore[assignment]
 
     # Avoid preexec_fn: the daemon is multi-threaded and preexec_fn is unsafe there.
-    process = subprocess.Popen(command)
+    process = subprocess.Popen(command, env=_playback_env())
     title = _playback_title(path)
     if process.pid:
         try:
@@ -81,12 +102,12 @@ def play_wav(path: Path) -> None:
         raise SpeechError(f"Playback failed with exit code {returncode}.")
 
 
-def play_samples(samples: Sequence[Sample], sample_rate: int) -> None:
+def play_samples(samples: Sequence[Sample], sample_rate: int, volume: float = DEFAULT_VOLUME) -> None:
     with NamedTemporaryFile(suffix=".wav", delete=False) as handle:
         path = Path(handle.name)
     try:
         write_wav(path, samples, sample_rate)
-        play_wav(path)
+        play_wav(path, volume=volume)
     finally:
         try:
             path.unlink()
@@ -94,10 +115,14 @@ def play_samples(samples: Sequence[Sample], sample_rate: int) -> None:
             pass
 
 
-def playback_command(path: Path) -> Optional[list[str]]:
+def playback_command(path: Path, volume: float = DEFAULT_VOLUME) -> Optional[list[str]]:
+    """Build a platform player command. Volume is linear 0.0–1.0 (clamped)."""
+    volume = clamp_volume(volume)
     if sys.platform == "darwin" and shutil.which("afplay"):
-        return ["afplay", str(path)]
+        # afplay -v accepts a linear gain (1.0 = full scale).
+        return ["afplay", "-v", str(volume), str(path)]
     if sys.platform == "win32":
+        # System.Media.SoundPlayer has no volume control; play full-scale.
         escaped = str(path).replace("'", "''")
         script = (
             f"$p='{escaped}';"
@@ -110,10 +135,45 @@ def playback_command(path: Path) -> Optional[list[str]]:
         exe = shutil.which(candidate)
         if not exe:
             continue
+        if candidate == "paplay":
+            # Low latency + SIGSTOP pause: quiet within ~one buffer period,
+            # resume continues the stream (no skipped words).
+            return [
+                exe,
+                f"--volume={paplay_volume_value(volume)}",
+                f"--latency-msec={PAPLAY_LATENCY_MSEC}",
+                f"--process-time-msec={PAPLAY_PROCESS_TIME_MSEC}",
+                "--client-name=tts",
+                "--stream-name=Speech",
+                str(path),
+            ]
         if candidate == "ffplay":
-            return [exe, "-nodisp", "-autoexit", "-loglevel", "quiet", str(path)]
-        return [exe, str(path)]
+            return [
+                exe,
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "quiet",
+                "-fflags",
+                "nobuffer",
+                "-flags",
+                "low_delay",
+                "-af",
+                f"volume={volume}",
+                str(path),
+            ]
+        # aplay: small period for snappier pause under SIGSTOP.
+        return [exe, "-B", "40000", "-F", "10000", str(path)]
     return None
+
+
+def _playback_env() -> dict[str, str]:
+    """Prefer short PipeWire/Pulse client buffers for responsive pause."""
+    env = os.environ.copy()
+    env.setdefault("PULSE_LATENCY_MSEC", str(PAPLAY_LATENCY_MSEC))
+    # quantum/rate ≈ 40ms at 48 kHz; harmless if Pulse is used instead.
+    env.setdefault("PIPEWIRE_LATENCY", f"{int(48000 * PAPLAY_LATENCY_MSEC / 1000)}/48000")
+    return env
 
 
 def _wait_for_playback(process: subprocess.Popen, title: str) -> int:

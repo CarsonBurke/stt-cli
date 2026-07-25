@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from tts.backends.onnx import resolve_provider
 from tts.backends.vibevoice import resolve_device, resolve_model
 from tts.cli import _apply_defaults, _benchmark_variants, _resolve_text, _should_use_daemon, _speak_parser
-from tts.audio import _to_pcm16
+from tts.audio import _to_pcm16, clamp_volume, paplay_volume_value, playback_command
 from tts.backends import SpeakRequest
 from tts.backends import system
 from tts.backends.model_audio import _to_mono_samples
@@ -24,6 +26,7 @@ def test_builtin_default_backend_is_kokoro():
     assert BUILTIN_DEFAULTS["backend"] == "kokoro"
     assert BUILTIN_DEFAULTS["speaker"] == "af_sarah"
     assert BUILTIN_DEFAULTS["speed"] == 1.25
+    assert BUILTIN_DEFAULTS["volume"] == 0.7
     assert BUILTIN_DEFAULTS["daemon"] is True
     assert BUILTIN_DEFAULTS["daemon_idle_seconds"] == 1800
 
@@ -91,6 +94,7 @@ def test_config_file_provides_speak_defaults(tmp_path):
         "backend = system\n"
         "voice = Samantha\n"
         "speed = 1.2\n"
+        "volume = 0.4\n"
         "model-size = 1.5\n"
         "num_threads = 4\n",
         encoding="utf-8",
@@ -102,20 +106,106 @@ def test_config_file_provides_speak_defaults(tmp_path):
     assert args.backend == "system"
     assert args.voice == "Samantha"
     assert args.speed == 1.2
+    assert args.volume == 0.4
     assert args.model_size == "1.5"
     assert args.num_threads == 4
 
 
 def test_cli_options_override_config_file(tmp_path):
     config_path = tmp_path / "config.ini"
-    config_path.write_text("[speak]\nbackend = system\nspeed = 1.2\nvoice = Samantha\n", encoding="utf-8")
+    config_path.write_text(
+        "[speak]\nbackend = system\nspeed = 1.2\nvolume = 0.4\nvoice = Samantha\n",
+        encoding="utf-8",
+    )
 
-    args = _speak_parser().parse_args(["--backend", "onnx", "--speed", "0.9", "hello"])
+    args = _speak_parser().parse_args(
+        ["--backend", "onnx", "--speed", "0.9", "--volume", "0.85", "hello"]
+    )
     _apply_defaults(args, load_config(str(config_path), disabled=False))
 
     assert args.backend == "onnx"
     assert args.speed == 0.9
+    assert args.volume == 0.85
     assert args.voice == "Samantha"
+
+
+def test_builtin_volume_default_applies_without_config():
+    args = _speak_parser().parse_args(["hello"])
+    _apply_defaults(args, {})
+    assert args.volume == 0.7
+
+
+def test_parser_accepts_volume_flag():
+    args = _speak_parser().parse_args(["--volume", "0.55", "hello"])
+    assert args.volume == 0.55
+
+
+def test_paplay_volume_mapping():
+    assert paplay_volume_value(0.0) == 0
+    assert paplay_volume_value(1.0) == 65536
+    assert paplay_volume_value(0.7) == 45875
+    assert paplay_volume_value(-1.0) == 0
+    assert paplay_volume_value(2.0) == 65536
+
+
+def test_clamp_volume():
+    assert clamp_volume(-0.5) == 0.0
+    assert clamp_volume(0.3) == 0.3
+    assert clamp_volume(1.5) == 1.0
+
+
+def test_playback_command_paplay_volume(tmp_path, monkeypatch):
+    path = tmp_path / "out.wav"
+    path.write_bytes(b"")
+    monkeypatch.setattr("tts.audio.sys.platform", "linux")
+    monkeypatch.setattr(
+        "tts.audio.shutil.which",
+        lambda name: "/usr/bin/paplay" if name == "paplay" else None,
+    )
+    assert playback_command(path, volume=0.7) == [
+        "/usr/bin/paplay",
+        "--volume=45875",
+        "--latency-msec=40",
+        "--process-time-msec=10",
+        "--client-name=tts",
+        "--stream-name=Speech",
+        str(path),
+    ]
+
+
+def test_playback_command_ffplay_volume(tmp_path, monkeypatch):
+    path = tmp_path / "out.wav"
+    path.write_bytes(b"")
+    monkeypatch.setattr("tts.audio.sys.platform", "linux")
+    monkeypatch.setattr(
+        "tts.audio.shutil.which",
+        lambda name: "/usr/bin/ffplay" if name == "ffplay" else None,
+    )
+    assert playback_command(path, volume=0.5) == [
+        "/usr/bin/ffplay",
+        "-nodisp",
+        "-autoexit",
+        "-loglevel",
+        "quiet",
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-af",
+        "volume=0.5",
+        str(path),
+    ]
+
+
+def test_playback_command_afplay_volume(tmp_path, monkeypatch):
+    path = tmp_path / "out.wav"
+    path.write_bytes(b"")
+    monkeypatch.setattr("tts.audio.sys.platform", "darwin")
+    monkeypatch.setattr(
+        "tts.audio.shutil.which",
+        lambda name: "/usr/bin/afplay" if name == "afplay" else None,
+    )
+    assert playback_command(path, volume=0.7) == ["afplay", "-v", "0.7", str(path)]
 
 
 def test_daemon_config_defaults_are_configurable(tmp_path):
@@ -143,7 +233,6 @@ def test_no_daemon_disables_daemon_path():
     _apply_defaults(args, {})
 
     assert _should_use_daemon(args) is False
-
 
 def test_model_backend_options_are_configurable(tmp_path):
     config_path = tmp_path / "config.ini"

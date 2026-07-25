@@ -7,6 +7,7 @@ tts speak "How are you doing?"
 tts-say "Build finished, but the database migration test is failing."
 tts speak --backend kokoro --speaker af_sarah "Review is blocked on an auth decision."
 tts-say --level blocked --title "Blocked" --body "Need migration approval."
+tts speak --volume 0.5 "Quieter status update."
 ```
 
 The command is intentionally thin. It does not redact, truncate, skip focus, or
@@ -59,9 +60,16 @@ go through this path.
 - `system`: Uses platform speech tools when available (`say` on macOS, SAPI on
   Windows, `spd-say`/`espeak`/`espeak-ng` on Linux).
 
-The built-in default is Kokoro with `af_sarah`, `speed = 1.25`, and
-`device = auto`. `auto` remains available and tries VibeVoice first, then ONNX
-if a model is configured, then system speech.
+The built-in default is Kokoro with `af_sarah`, `speed = 1.25`,
+`volume = 0.7`, and `device = auto`. `auto` remains available and tries
+VibeVoice first, then ONNX if a model is configured, then system speech.
+Playback volume is a linear gain from `0.0` (mute) to `1.0` (full scale),
+applied by the audio player when possible so `--no-play` WAV files stay
+full-scale.
+
+Pause uses `SIGSTOP` on the player so resume continues mid-utterance without
+skipping words. Playback requests a short audio buffer (~40 ms) so silence
+after pause is snappy rather than draining a multi-second queue.
 
 ## Config
 
@@ -90,6 +98,7 @@ Example:
 backend = kokoro
 speaker = af_sarah
 speed = 1.25
+volume = 0.7
 model_size = 0.5
 device = auto
 provider = auto

@@ -44,7 +44,7 @@ def speak(request: SpeakRequest) -> SpeechResult:
     output = request.output or _default_output_path()
     write_generated_audio(output, audio, DEFAULT_SAMPLE_RATE)
     if request.play:
-        play_wav(output)
+        play_wav(output, volume=request.volume)
     return SpeechResult(backend="kokoro", sample_rate=DEFAULT_SAMPLE_RATE, output_path=output)
 
 
@@ -63,6 +63,7 @@ def warm(request: SpeakRequest) -> None:
         generator = pipeline(request.text, voice=str(request.speaker or DEFAULT_VOICE), speed=request.speed)
         for _, _, _ in generator:
             pass
+
 
 
 def _pipeline(KPipeline, language: str, device: str):

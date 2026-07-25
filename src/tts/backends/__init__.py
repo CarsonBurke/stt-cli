@@ -19,6 +19,7 @@ class SpeakRequest:
     play: bool
     voice: Optional[str] = None
     speed: float = 1.0
+    volume: float = 0.7
     device: Optional[str] = None
     model: Optional[str] = None
     model_size: str = "0.5"

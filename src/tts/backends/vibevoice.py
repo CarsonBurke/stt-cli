@@ -68,7 +68,7 @@ def speak(request: SpeakRequest) -> SpeechResult:
         output = _default_output_path()
     write_wav(output, samples, sample_rate)
     if request.play:
-        play_wav(output)
+        play_wav(output, volume=request.volume)
     return SpeechResult(backend="vibevoice", sample_rate=sample_rate, output_path=output)
 
 
@@ -147,7 +147,7 @@ def _speak_realtime(request: SpeakRequest, model_id: str) -> SpeechResult:
     output = request.output or _default_output_path()
     write_generated_audio(output, outputs.speech_outputs[0], STREAMING_SAMPLE_RATE)
     if request.play:
-        play_wav(output)
+        play_wav(output, volume=request.volume)
     return SpeechResult(backend="vibevoice", sample_rate=STREAMING_SAMPLE_RATE, output_path=output)
 
 
