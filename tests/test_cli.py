@@ -234,6 +234,81 @@ def test_no_daemon_disables_daemon_path():
 
     assert _should_use_daemon(args) is False
 
+
+def test_kokoro_unload_clears_pipeline_cache():
+    from tts.backends import kokoro
+
+    sentinel = object()
+    kokoro._PIPELINES[("a", "cpu")] = sentinel
+    try:
+        kokoro.unload()
+        assert kokoro._PIPELINES == {}
+    finally:
+        kokoro._PIPELINES.clear()
+
+
+def test_daemon_ping_does_not_reset_idle_activity(monkeypatch, tmp_path):
+    """Status pings must not keep a warm model resident forever."""
+    import threading
+    from tts import daemon
+
+    config_path = tmp_path / "config.ini"
+    config_path.write_text("[speak]\nbackend = kokoro\n", encoding="utf-8")
+    monkeypatch.setenv("TTS_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("TTS_CONFIG", str(config_path))
+    monkeypatch.setattr(daemon, "_warm_kokoro", lambda config, resolve_option: None)
+    shutdown_calls: list[int] = []
+    real_shutdown = daemon._shutdown_engine
+
+    def tracking_shutdown():
+        shutdown_calls.append(1)
+        real_shutdown()
+
+    monkeypatch.setattr(daemon, "_shutdown_engine", tracking_shutdown)
+
+    errors: list[str] = []
+    done = threading.Event()
+    idle_seconds = 2
+
+    def run_server():
+        try:
+            daemon.serve(str(config_path), idle_seconds=idle_seconds, force_exit=False)
+        except Exception as exc:  # pragma: no cover - surfaced below
+            errors.append(str(exc))
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=run_server, daemon=True)
+    thread.start()
+
+    deadline = time.monotonic() + 10
+    state = None
+    while time.monotonic() < deadline:
+        state = daemon._read_state()
+        if state and state.get("ready"):
+            break
+        time.sleep(0.02)
+    assert state is not None and state.get("ready"), "daemon never became ready"
+
+    # Keep pinging past the idle window. If pings reset activity, the server
+    # would stay up; with the fix it still idle-exits.
+    ping_deadline = time.monotonic() + idle_seconds + 2.5
+    pings = 0
+    while time.monotonic() < ping_deadline and not done.is_set():
+        try:
+            response = daemon._request({"command": "ping"}, state, timeout=0.5)
+        except OSError:
+            break
+        assert response.get("ok") is True
+        pings += 1
+        time.sleep(0.15)
+
+    assert pings >= 3, f"expected several successful pings before exit, got {pings}"
+    assert done.wait(5), "daemon did not idle-exit while only receiving pings"
+    assert errors == []
+    assert shutdown_calls == [1], "idle exit must unload the engine"
+
+
 def test_model_backend_options_are_configurable(tmp_path):
     config_path = tmp_path / "config.ini"
     config_path.write_text(

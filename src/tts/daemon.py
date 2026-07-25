@@ -148,7 +148,7 @@ def speak(request: SpeakRequest, timeout: Optional[float] = None) -> SpeechResul
     )
 
 
-def serve(config_path: Optional[str], idle_seconds: int) -> None:
+def serve(config_path: Optional[str], idle_seconds: int, *, force_exit: bool = True) -> None:
     import socketserver
     import threading
 
@@ -170,10 +170,13 @@ def serve(config_path: Optional[str], idle_seconds: int) -> None:
     last_activity = time.monotonic()
     should_stop = threading.Event()
     speak_lock = threading.Lock()
+    active_speaks = 0
+    # idle_seconds <= 0 means run until explicit stop (same convention as MPRIS).
+    idle_exit = idle_seconds > 0
 
     class Handler(socketserver.StreamRequestHandler):
         def handle(self) -> None:
-            nonlocal last_activity
+            nonlocal last_activity, active_speaks
             raw = self.rfile.readline(1024 * 1024)
             if not raw:
                 return
@@ -182,7 +185,9 @@ def serve(config_path: Optional[str], idle_seconds: int) -> None:
                 if message.get("token") != token:
                     raise DaemonError("invalid daemon token")
                 command = message.get("command")
-                last_activity = time.monotonic()
+                # Health checks must not keep the warm model alive forever.
+                if command != "ping":
+                    last_activity = time.monotonic()
                 if command == "ping":
                     self._write({"ok": True, "ready": server_state["ready"], "pid": os.getpid()})
                     return
@@ -195,7 +200,12 @@ def serve(config_path: Optional[str], idle_seconds: int) -> None:
                         raise DaemonError("daemon is not ready")
                     request = _request_from_json(message.get("request") or {})
                     with speak_lock:
-                        result = _speak_kokoro(request)
+                        active_speaks += 1
+                        try:
+                            result = _speak_kokoro(request)
+                        finally:
+                            active_speaks -= 1
+                            last_activity = time.monotonic()
                     self._write(
                         {
                             "ok": True,
@@ -214,7 +224,12 @@ def serve(config_path: Optional[str], idle_seconds: int) -> None:
                         message.get("tts_config"),
                     )
                     with speak_lock:
-                        result = _speak_kokoro(request)
+                        active_speaks += 1
+                        try:
+                            result = _speak_kokoro(request)
+                        finally:
+                            active_speaks -= 1
+                            last_activity = time.monotonic()
                     self._write(
                         {
                             "ok": True,
@@ -236,6 +251,13 @@ def serve(config_path: Optional[str], idle_seconds: int) -> None:
     class Server(socketserver.ThreadingMixIn, socketserver.TCPServer):
         allow_reuse_address = True
         daemon_threads = True
+        accept_timed_out = False
+
+        def handle_timeout(self) -> None:
+            # Base handle_request returns the same None on accept and timeout;
+            # track timeouts so idle exit is only considered when no request
+            # was just accepted (avoids tearing down a race-accepted speak).
+            self.accept_timed_out = True
 
     with Server(("127.0.0.1", 0), Handler) as server:
         server.timeout = 1
@@ -251,10 +273,21 @@ def serve(config_path: Optional[str], idle_seconds: int) -> None:
                 pass
             _warm_kokoro(config, resolve_option)
             server_state["ready"] = True
+            last_activity = time.monotonic()
             _write_state(server_state)
             while not should_stop.is_set():
+                server.accept_timed_out = False
                 server.handle_request()
-                if time.monotonic() - last_activity >= idle_seconds:
+                if (
+                    idle_exit
+                    and server.accept_timed_out
+                    and _idle_ready_to_exit(
+                        last_activity=last_activity,
+                        idle_seconds=idle_seconds,
+                        active_speaks=active_speaks,
+                        speak_lock=speak_lock,
+                    )
+                ):
                     break
         finally:
             try:
@@ -263,7 +296,49 @@ def serve(config_path: Optional[str], idle_seconds: int) -> None:
                 mpris.stop_session_helper()
             except Exception:
                 pass
+            # Drop liveness first so a new daemon can start while we free VRAM.
             _unlink_state()
+            _shutdown_engine()
+
+    # Torch/CUDA often leave non-daemon worker threads that block normal
+    # interpreter shutdown, so the process keeps VRAM after idle exit.
+    if force_exit:
+        os._exit(0)
+
+
+def _shutdown_engine() -> None:
+    try:
+        from .backends import kokoro
+
+        kokoro.unload()
+    except Exception:
+        pass
+
+
+def _idle_ready_to_exit(
+    *,
+    last_activity: float,
+    idle_seconds: int,
+    active_speaks: int,
+    speak_lock: Any,
+) -> bool:
+    """True when idle long enough and no speak is in flight.
+
+    Acquire the speak lock without blocking so we do not tear down mid-utterance
+    under ThreadingMixIn (handler threads race the main loop).
+    """
+    if active_speaks != 0:
+        return False
+    if time.monotonic() - last_activity < idle_seconds:
+        return False
+    if not speak_lock.acquire(blocking=False):
+        return False
+    try:
+        if active_speaks != 0:
+            return False
+        return time.monotonic() - last_activity >= idle_seconds
+    finally:
+        speak_lock.release()
 
 
 def _speak_kokoro(request: SpeakRequest) -> SpeechResult:

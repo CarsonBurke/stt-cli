@@ -17,8 +17,9 @@ decide when speech is important. That policy belongs to the orchestrator agent.
 The Kokoro backend uses a local warm daemon by default. The first start loads
 and warms the model through a `uv`-managed Python environment; later
 `tts speak ...` calls send text to that process so short status updates can
-begin much faster than a fresh neural TTS process. The daemon exits after 30
-idle minutes by default.
+begin much faster than a fresh neural TTS process. After 30 idle minutes by
+default (no speech), the daemon unloads the model to free VRAM/RAM and exits.
+Health checks (`tts daemon status`) do not reset that idle timer.
 
 While WAV audio is playing on Linux/macOS (Kokoro and other model backends),
 you can control it from the CLI or system media keys:

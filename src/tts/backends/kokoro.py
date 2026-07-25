@@ -65,6 +65,25 @@ def warm(request: SpeakRequest) -> None:
             pass
 
 
+def unload() -> None:
+    """Drop cached pipelines and release GPU memory when possible."""
+    with _PIPELINE_LOCK:
+        _PIPELINES.clear()
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+    except ImportError:
+        return
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            if hasattr(torch.cuda, "ipc_collect"):
+                torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
 
 def _pipeline(KPipeline, language: str, device: str):
     key = (language, device)
